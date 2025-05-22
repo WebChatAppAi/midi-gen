@@ -1,10 +1,11 @@
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QStyle, QFrame
+    QWidget, QHBoxLayout, QLabel, QStyle, QFrame, QComboBox
 ) # QPushButton and QSlider removed as ModernSlider/Button are used
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, Signal, Slot, QSize # Import QSize
 from PySide6.QtGui import QFont, QIcon # Import QFont and QIcon
 from ui.custom_widgets import ModernSlider, ModernIconButton # Use ModernIconButton
 from config import theme # Import theme
+from config.constants import INSTRUMENT_MAPPINGS # Added for instrument selector
 
 class TransportControls(QWidget):
     """Transport controls for MIDI playback (play, stop, BPM, time slider)"""
@@ -15,6 +16,7 @@ class TransportControls(QWidget):
     stopClicked = Signal()
     seekPositionChanged = Signal(float) # position in seconds
     bpmChangedSignal = Signal(int)
+    instrumentChangedSignal = Signal(str) # New signal for instrument changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,7 +112,68 @@ class TransportControls(QWidget):
         self.bpm_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self.bpm_value_label)
 
+        # Separator line for instrument selector
+        line3 = QFrame()
+        line3.setFrameShape(QFrame.VLine)
+        line3.setFrameShadow(QFrame.Sunken)
+        line3.setStyleSheet(f"color: {theme.BORDER_COLOR_NORMAL.name()};")
+        layout.addWidget(line3)
+        layout.addSpacing(theme.PADDING_S)
+
+        # Instrument Selector
+        self.instrument_label = QLabel("Instrument:")
+        self.instrument_label.setFont(QFont(theme.FONT_FAMILY_PRIMARY, theme.FONT_SIZE_M))
+        self.instrument_label.setStyleSheet(f"color: {theme.SECONDARY_TEXT_COLOR.name()};")
+        layout.addWidget(self.instrument_label)
+
+        self.instrument_selector = QComboBox()
+        self.instrument_selector.setFont(QFont(theme.FONT_FAMILY_PRIMARY, theme.FONT_SIZE_M))
+        self.instrument_selector.setStyleSheet(f"""
+            QComboBox {{
+                color: {theme.PRIMARY_TEXT_COLOR.name()};
+                background-color: {theme.PANEL_BG_COLOR.darker(110).name()};
+                border: 1px solid {theme.BORDER_COLOR_NORMAL.name()};
+                border-radius: {theme.BORDER_RADIUS_S}px;
+                padding: {theme.PADDING_XS}px {theme.PADDING_S}px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 15px;
+                border-left-width: 1px;
+                border-left-color: {theme.BORDER_COLOR_NORMAL.name()};
+                border-left-style: solid; 
+                border-top-right-radius: {theme.BORDER_RADIUS_S}px;
+                border-bottom-right-radius: {theme.BORDER_RADIUS_S}px;
+            }}
+            QComboBox::down-arrow {{
+                image: url({theme.DROPDOWN_ICON_PATH}); 
+                width: {theme.ICON_SIZE_S}px;
+                height: {theme.ICON_SIZE_S}px;
+            }}
+            QComboBox QAbstractItemView {{
+                color: {theme.PRIMARY_TEXT_COLOR.name()};
+                background-color: {theme.PANEL_BG_COLOR.darker(130).name()};
+                border: 1px solid {theme.BORDER_COLOR_STRONG.name()};
+                selection-background-color: {theme.ACCENT_PRIMARY_COLOR.name()};
+                selection-color: {theme.PRIMARY_TEXT_COLOR.name()};
+                outline: 0px; /* Remove focus outline on items */
+            }}
+        """)
+        self.instrument_selector.addItems(INSTRUMENT_MAPPINGS.keys())
+        self.instrument_selector.setMinimumWidth(120) # Adjusted from 150 for flexibility
+        self.instrument_selector.currentTextChanged.connect(self._handle_instrument_change)
+        layout.addWidget(self.instrument_selector)
+
         self._is_playing = False
+
+    def _handle_instrument_change(self, instrument_name: str):
+        self.instrumentChangedSignal.emit(instrument_name)
+
+    def set_selected_instrument(self, instrument_name: str):
+        self.instrument_selector.blockSignals(True)
+        self.instrument_selector.setCurrentText(instrument_name)
+        self.instrument_selector.blockSignals(False)
 
     def _handle_play_pause(self):
         if self.play_button.isChecked(): # If button is now checked (meaning play was clicked)

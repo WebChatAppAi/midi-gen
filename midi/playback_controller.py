@@ -1,18 +1,36 @@
 import time
 import threading
-import pygame.midi # For init/quit, though DeviceManager also handles init
+import pygame.midi # For init/quit if other pygame.midi parts are used
 import pretty_midi # For Note object type hint
-from .device_manager import DeviceManager
+# from .device_manager import DeviceManager # Removed
 from .note_scheduler import NoteScheduler
-from .midi_event_utils import send_all_notes_off # For an explicit stop
+from .midi_event_utils import send_all_notes_off
+from .fluidsynth_player import FluidSynthPlayer
+from config.constants import SOUNDFONT_PATH, INSTRUMENT_MAPPINGS
 
 class PlaybackController:
-    """Controls MIDI playback, managing state, device, and note scheduling."""
+    """Controls MIDI playback, managing state, FluidSynthPlayer, and note scheduling."""
 
     def __init__(self):
-        # pygame.midi.init() # DeviceManager will handle this
-        self.device_manager = DeviceManager()
-        
+        # pygame.midi.init() # Ensure this is called once if other pygame.midi (e.g. input) is used.
+        # For now, playback is via FluidSynthPlayer.
+
+        self.fluidsynth_player = None
+        self.log_events = True # For debugging - moved up for use in init
+
+        try:
+            self.fluidsynth_player = FluidSynthPlayer(SOUNDFONT_PATH)
+            if not self.fluidsynth_player.fs: # Check if FluidSynth was initialized properly
+                if self.log_events: print("PlaybackController: FluidSynthPlayer failed to initialize (fs is None). Playback disabled.")
+                self.fluidsynth_player = None # Ensure it's None if failed
+            else:
+                if self.log_events: print("PlaybackController: FluidSynthPlayer initialized successfully.")
+                # Set default instrument
+                self.set_instrument(INSTRUMENT_MAPPINGS.get("EZ Pluck", 0)) # Default to program 0 if "EZ Pluck" is missing
+        except Exception as e:
+            if self.log_events: print(f"PlaybackController: Exception during FluidSynthPlayer initialization: {e}. Playback disabled.")
+            self.fluidsynth_player = None
+
         self.notes = []
         self._is_playing_internal = False # Actual state of playback for scheduler
         self.paused = False
@@ -31,54 +49,81 @@ class PlaybackController:
         
         # Scheduler is created when notes are set, or on first play
         self.note_scheduler = None
-        self.log_events = True # For debugging
+        # self.log_events = True # Moved up
 
     def _ensure_scheduler(self):
-        """Creates a NoteScheduler instance if one doesn't exist or if output device changed."""
-        output_dev = self.device_manager.get_output_device()
-        if not self.note_scheduler or self.note_scheduler.output_device != output_dev:
+        """Creates a NoteScheduler instance if one doesn't exist or if midi_output_target changed."""
+        if not self.fluidsynth_player:
+            if self.log_events: print("PlaybackController: Cannot ensure scheduler, FluidSynthPlayer not available.")
+            self.note_scheduler = None # Ensure no old scheduler is used
+            return
+
+        # Condition for recreating scheduler:
+        # 1. No scheduler exists.
+        # 2. Scheduler exists but its target is not the current fluidsynth_player.
+        if not self.note_scheduler or self.note_scheduler.midi_output_target != self.fluidsynth_player:
             if self.note_scheduler: # If exists, stop its thread before replacing
-                 self.note_scheduler.stop_playback_thread()
+                self.note_scheduler.stop_playback_thread()
             
-            if output_dev:
-                self.note_scheduler = NoteScheduler(
-                    notes=self.notes,
-                    output_device=output_dev,
-                    get_current_time_func=self.get_current_position,
-                    tempo_scale_func=lambda: self.tempo_scale_factor,
-                    stop_flag=self.stop_flag,
-                    is_playing_flag=self._is_playing_for_scheduler # Pass the mutable list
-                )
-                if self.log_events: print("PlaybackController: NoteScheduler created/recreated.")
-            else:
-                self.note_scheduler = None
-                if self.log_events: print("PlaybackController: Failed to create NoteScheduler, no output device.")
+            self.note_scheduler = NoteScheduler(
+                notes=self.notes,
+                midi_output_target=self.fluidsynth_player, # Pass the FluidSynthPlayer instance
+                get_current_time_func=self.get_current_position,
+                tempo_scale_func=lambda: self.tempo_scale_factor,
+                stop_flag=self.stop_flag,
+                is_playing_flag=self._is_playing_for_scheduler, # Pass the mutable list
+                log_events=self.log_events
+            )
+            if self.log_events: print("PlaybackController: NoteScheduler created/recreated for FluidSynthPlayer.")
         elif self.note_scheduler:
-             # If scheduler exists, ensure its notes are current
-             self.note_scheduler.update_notes(self.notes)
+            # If scheduler exists and target is current, ensure its notes are current
+            self.note_scheduler.update_notes(self.notes)
 
 
     def set_notes(self, notes: list[pretty_midi.Note]):
-        if self.log_events: print(f"PlaybackController: Setting {len(notes)} notes.")
-        self.stop() # Stop current playback before changing notes
+        # if self.log_events: print(f"PlaybackController: Setting {len(notes)} notes.") # Original line
+        # Stop current playback before changing notes
+        # Check if fluidsynth_player is available before calling stop, as stop might try to use it.
+        if self.fluidsynth_player:
+            if self.log_events: print(f"PlaybackController: Setting {len(notes)} notes. Stopping current playback.")
+            self.stop() 
+        else:
+            # If no player, still log and prepare notes, but playback won't happen.
+            if self.log_events: print(f"PlaybackController: Setting {len(notes)} notes. FluidSynthPlayer not available.")
+            # Manually ensure flags are reset as stop() would do.
+            self._is_playing_internal = False
+            self._is_playing_for_scheduler[0] = False
+            self.paused = False
+
+
         self.notes = notes if notes else []
         self.current_playback_time_sec = 0.0
         self.pause_start_time_sec = 0.0
-        if self.note_scheduler:
-            self.note_scheduler.update_notes(self.notes)
-            self.note_scheduler.reset_playback_position(0.0)
+        
+        if self.fluidsynth_player: # Only update/ensure scheduler if player is available
+            if self.note_scheduler:
+                self.note_scheduler.update_notes(self.notes)
+                self.note_scheduler.reset_playback_position(0.0)
+            else:
+                self._ensure_scheduler() # Create scheduler if it wasn't there
         else:
-            self._ensure_scheduler() # Create scheduler if it wasn't there
+            if self.log_events: print("PlaybackController: FluidSynthPlayer not available, cannot ensure scheduler for new notes.")
+
 
     def play(self):
         if self.log_events: print(f"PlaybackController: Play called. Currently playing: {self._is_playing_internal}, Paused: {self.paused}")
+        
+        if not self.fluidsynth_player:
+            if self.log_events: print("PlaybackController: Cannot play, FluidSynthPlayer not available.")
+            return
+            
         if not self.notes:
             if self.log_events: print("PlaybackController: No notes to play.")
             return
 
-        self._ensure_scheduler()
-        if not self.note_scheduler or not self.note_scheduler.output_device:
-            if self.log_events: print("PlaybackController: Cannot play, scheduler or output device not available.")
+        self._ensure_scheduler() # This will now use self.fluidsynth_player
+        if not self.note_scheduler or not self.note_scheduler.midi_output_target: # Changed from output_device
+            if self.log_events: print("PlaybackController: Cannot play, scheduler or FluidSynthPlayer not available for scheduler.")
             return
 
         if self._is_playing_internal and not self.paused: # Already playing
@@ -113,18 +158,22 @@ class PlaybackController:
             if self.log_events: print(f"PlaybackController: Paused at {self.pause_start_time_sec:.2f}s.")
             
             # Send all notes off when pausing
-            if self.note_scheduler and self.note_scheduler.output_device:
-                send_all_notes_off(self.note_scheduler.output_device, self.log_events)
+            if self.fluidsynth_player: # Use fluidsynth_player directly
+                send_all_notes_off(self.fluidsynth_player, self.log_events)
         
 
     def stop(self):
         if self.log_events: print("PlaybackController: Stop called.")
         self._is_playing_internal = False
-        self._is_playing_for_scheduler[0] = False
+        self._is_playing_for_scheduler[0] = False # Update shared flag
         self.paused = False
         
+        # NoteScheduler's stop_playback_thread will call send_all_notes_off with its midi_output_target
         if self.note_scheduler:
-            self.note_scheduler.stop_playback_thread() # This will also send all notes off
+            self.note_scheduler.stop_playback_thread() 
+        elif self.fluidsynth_player: 
+            # If scheduler wasn't active/created, but player exists, ensure notes are off
+            send_all_notes_off(self.fluidsynth_player, self.log_events)
         
         self.current_playback_time_sec = 0.0
         self.pause_start_time_sec = 0.0
@@ -135,24 +184,41 @@ class PlaybackController:
     def seek(self, position_sec: float):
         if self.log_events: print(f"PlaybackController: Seek to {position_sec:.2f}s.")
         
+        if not self.fluidsynth_player:
+            if self.log_events: print("PlaybackController: Cannot seek, FluidSynthPlayer not available.")
+            # Set time but don't attempt MIDI operations or scheduler interaction
+            self.current_playback_time_sec = max(0.0, position_sec)
+            self.pause_start_time_sec = self.current_playback_time_sec
+            return
+
         # Stop notes before seek, regardless of playing state
-        if self.note_scheduler and self.note_scheduler.output_device:
-             send_all_notes_off(self.note_scheduler.output_device, self.log_events)
+        send_all_notes_off(self.fluidsynth_player, self.log_events)
 
         self.current_playback_time_sec = max(0.0, position_sec)
         self.pause_start_time_sec = self.current_playback_time_sec # If paused, resume from here
 
-        if self.note_scheduler:
+        if self.note_scheduler: # Should exist if fluidsynth_player is available and play/set_notes was called
             self.note_scheduler.reset_playback_position(self.current_playback_time_sec)
 
-        # If it was playing, need to restart the thread from the new position
-        # or if paused, update the resume point.
-        if self._is_playing_internal or self.paused:
-            self.playback_start_real_time = time.time() - self.current_playback_time_sec / self.tempo_scale_factor
-            if self._is_playing_internal and not self.paused and self.note_scheduler: # Was playing, restart thread
-                # self.note_scheduler.stop_playback_thread() # Stop existing - handled by start_playback_thread if needed
-                self.note_scheduler.start_playback_thread() # Start new from current pos
-        
+        # Adjust playback_start_real_time for accurate get_current_position calculation
+        # This needs to happen whether playing, paused, or stopped, so get_current_position is correct if play() is called next.
+        self.playback_start_real_time = time.time() - self.current_playback_time_sec / self.tempo_scale_factor
+
+        if self._is_playing_internal and not self.paused: # Was playing, restart scheduler thread
+            if self.note_scheduler:
+                 # Stop existing thread and clear its events first.
+                self.note_scheduler.stop_playback_thread(join=False) # Don't join here, start_playback_thread will handle it or create new.
+                # Ensure stop_flag is clear before restarting, as stop_playback_thread sets it.
+                self.stop_flag.clear() 
+                # Ensure _is_playing_for_scheduler is true so the new thread runs.
+                self._is_playing_for_scheduler[0] = True 
+                self.note_scheduler.start_playback_thread()
+        elif self.paused:
+            # If paused, the current_playback_time_sec is already set.
+            # self.pause_start_time_sec is also self.current_playback_time_sec
+            # When play() is called, it will resume from this new self.pause_start_time_sec.
+            pass
+
         if self.log_events: print(f"PlaybackController: Seek complete. Current time: {self.current_playback_time_sec:.2f}s")
 
 
@@ -208,3 +274,22 @@ class PlaybackController:
 
     def __del__(self):
         self.cleanup()
+
+    def set_instrument(self, program_number: int, channel: int = 0):
+        """Sets the instrument for a given channel on the FluidSynthPlayer."""
+        if self.fluidsynth_player and self.fluidsynth_player.fs:
+            try:
+                self.fluidsynth_player.program_change(channel, program_number)
+                if self.log_events:
+                    # Try to find instrument name from mapping for logging
+                    instrument_name = "Unknown"
+                    for name, prog_num in INSTRUMENT_MAPPINGS.items():
+                        if prog_num == program_number:
+                            instrument_name = name
+                            break
+                    print(f"PlaybackController: Set instrument on channel {channel} to program {program_number} ({instrument_name}).")
+            except Exception as e:
+                if self.log_events:
+                    print(f"PlaybackController: Error setting instrument (Ch: {channel}, Pgm: {program_number}): {e}")
+        elif self.log_events:
+            print(f"PlaybackController: Cannot set instrument, FluidSynthPlayer not available or not initialized.")

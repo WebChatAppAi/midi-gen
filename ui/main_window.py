@@ -24,6 +24,7 @@ from .plugin_panel import PluginManagerPanel
 from .transport_controls import TransportControls
 from .event_handlers import MainWindowEventHandlersMixin, GlobalPlaybackHotkeyFilter # Added GlobalPlaybackHotkeyFilter
 from config import theme # Import the theme configuration
+from config.constants import INSTRUMENT_MAPPINGS # Added for instrument selection
 
 
 class PianoRollMainWindow(QMainWindow, MainWindowEventHandlersMixin):
@@ -52,7 +53,31 @@ class PianoRollMainWindow(QMainWindow, MainWindowEventHandlersMixin):
         
         self.transport_controls = TransportControls()
         self.main_layout.addWidget(self.transport_controls)
-        self._connect_transport_signals()
+        self._connect_transport_signals() # Existing connections
+
+        # Connect new instrument changed signal
+        self.transport_controls.instrumentChangedSignal.connect(self.instrument_changed_slot)
+        
+        # Initialize default instrument
+        # This needs to be after midi_player is initialized and transport_controls are available
+        default_instrument_name = "EZ Pluck" 
+        # A more robust way to get the first key, if order matters and dict is not guaranteed
+        # default_instrument_name = next(iter(INSTRUMENT_MAPPINGS)) if INSTRUMENT_MAPPINGS else None
+        if default_instrument_name and default_instrument_name in INSTRUMENT_MAPPINGS:
+            default_program_number = INSTRUMENT_MAPPINGS[default_instrument_name]
+            # Ensure midi_player.set_instrument exists and is called.
+            # This relies on midi_player.py being updated as per step 4 of the task.
+            if hasattr(self.midi_player, 'set_instrument'):
+                self.midi_player.set_instrument(default_program_number) 
+                print(f"MainWindow: Default instrument '{default_instrument_name}' (Program: {default_program_number}) set on MidiPlayer.")
+            else:
+                print(f"MainWindow: MidiPlayer does not have set_instrument method. Cannot set default instrument.")
+            
+            # Update the transport controls UI to reflect this default
+            self.transport_controls.set_selected_instrument(default_instrument_name)
+            print(f"MainWindow: TransportControls UI set to default instrument '{default_instrument_name}'.")
+        elif self.midi_notes: # If notes are loaded but default instrument isn't found, it's an issue.
+             print(f"MainWindow: Default instrument '{default_instrument_name}' not found in INSTRUMENT_MAPPINGS.")
         
         self.create_plugin_manager()
         
@@ -471,6 +496,19 @@ class PianoRollMainWindow(QMainWindow, MainWindowEventHandlersMixin):
                 self.transport_controls.update_time_slider_maximum(scaled_duration_ms)
         else:
             pass
+
+    @Slot(str)
+    def instrument_changed_slot(self, instrument_name: str):
+        """Handles instrument changes from the TransportControls."""
+        if instrument_name in INSTRUMENT_MAPPINGS:
+            program_number = INSTRUMENT_MAPPINGS[instrument_name]
+            if hasattr(self.midi_player, 'set_instrument'):
+                self.midi_player.set_instrument(program_number)
+                print(f"MainWindow: Instrument changed to '{instrument_name}' (Program: {program_number}).")
+            else:
+                print(f"MainWindow: MidiPlayer does not have set_instrument. Cannot change instrument to '{instrument_name}'.")
+        else:
+            print(f"MainWindow: Instrument '{instrument_name}' not found in INSTRUMENT_MAPPINGS.")
     
     # eventFilter and closeEvent are now inherited from MainWindowEventHandlersMixin
 

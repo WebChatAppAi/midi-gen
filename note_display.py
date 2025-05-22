@@ -44,7 +44,8 @@ class PianoRollDisplay(QWidget):
         self.bpm = DEFAULT_BPM
         self.horizontal_zoom_factor = 1.0
         self.vertical_zoom_factor = 1.0
-        self.time_scale = BASE_TIME_SCALE * (DEFAULT_BPM / self.bpm) * self.horizontal_zoom_factor
+        # Initialize time_scale without BPM dependency
+        self.time_scale = BASE_TIME_SCALE * self.horizontal_zoom_factor
         self.time_signature_numerator = 4
         self.time_signature_denominator = 4
         
@@ -105,10 +106,10 @@ class PianoRollDisplay(QWidget):
     def set_bpm(self, bpm):
         if bpm <= 0 or self.bpm == bpm: return
         self.bpm = bpm
-        self.time_scale = BASE_TIME_SCALE * (DEFAULT_BPM / self.bpm) * self.horizontal_zoom_factor
-        self._update_quantization_value()
-        self.calculate_total_width()
-        self.update()
+        # self.time_scale = BASE_TIME_SCALE * (DEFAULT_BPM / self.bpm) * self.horizontal_zoom_factor # REMOVED as per task
+        self._update_quantization_value() # This depends on BPM, so it's correct here
+        self.calculate_total_width() # This might implicitly use BPM for min_time_from_bars, ensure it's still logical
+        self.update() # Redraw the display (grid lines will change based on new BPM)
 
     def set_time_signature(self, numerator: int, denominator: int):
         if numerator <= 0 or denominator <= 0: return
@@ -297,7 +298,8 @@ class PianoRollDisplay(QWidget):
 
             self.horizontal_zoom_factor = max(self.MIN_HORIZONTAL_ZOOM, min(self.MAX_HORIZONTAL_ZOOM, new_zoom_factor))
             
-            self.time_scale = BASE_TIME_SCALE * (DEFAULT_BPM / self.bpm) * self.horizontal_zoom_factor
+            # Update time_scale without BPM dependency
+            self.time_scale = BASE_TIME_SCALE * self.horizontal_zoom_factor
             
             # This recalculates minimum width based on new time_scale and total_time
             self.calculate_total_width() 
@@ -376,8 +378,8 @@ class PianoRollDisplay(QWidget):
         
         self.horizontal_zoom_factor = max(self.MIN_HORIZONTAL_ZOOM, min(self.MAX_HORIZONTAL_ZOOM, new_horizontal_zoom_factor))
         
-        # Update time_scale based on the new zoom factor
-        self.time_scale = BASE_TIME_SCALE * (DEFAULT_BPM / self.bpm) * self.horizontal_zoom_factor
+        # Update time_scale based on the new zoom factor, without BPM dependency
+        self.time_scale = BASE_TIME_SCALE * self.horizontal_zoom_factor
         
         # Recalculate total width which also calls updateGeometry
         self.calculate_total_width() 

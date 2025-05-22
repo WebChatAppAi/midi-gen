@@ -1,11 +1,21 @@
 import sys
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon # Added for application icon
 from ui.main_window import PianoRollMainWindow
 import os
 import pretty_midi
 
 def main():
     app = QApplication(sys.argv)
+
+    # Set application icon
+    icon_path = "assets/icons/app_icon.png"
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+        print(f"Application icon set from {icon_path}")
+    else:
+        print(f"Warning: Application icon not found at {icon_path}. Using default icon.")
+
     # app.setStyle('Fusion') # Commented out to allow custom QSS to take full effect
 
     # Optional: Load initial MIDI data if a file is specified via an environment variable or argument

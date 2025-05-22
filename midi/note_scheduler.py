@@ -1,27 +1,35 @@
 import time
 import threading
 import pretty_midi # For logging note names
+import pygame # For pygame.midi.Output type check
 from .midi_event_utils import send_note_on, send_note_off, send_all_notes_off
+from .fluidsynth_player import FluidSynthPlayer # For type hinting/checking
 
 class NoteScheduler:
-    """Handles the timing and scheduling of MIDI note events for playback."""
+    """Handles the timing and scheduling of MIDI note events for playback to a target (FluidSynthPlayer or pygame.midi)."""
 
-    def __init__(self, notes, output_device, get_current_time_func, tempo_scale_func, stop_flag, is_playing_flag):
+    def __init__(self, notes, midi_output_target, get_current_time_func, tempo_scale_func, stop_flag, is_playing_flag, log_events=True):
         self.notes = sorted(notes, key=lambda note: note.start) if notes else []
-        self.output_device = output_device # This should be an opened pygame.midi.Output object
-        self.get_current_time = get_current_time_func # Function to get current playback time in seconds
-        self.get_tempo_scale = tempo_scale_func # Function to get current tempo_scale
-        self.stop_flag = stop_flag # threading.Event()
-        self.is_playing_flag = is_playing_flag # A mutable flag or a function returning bool
+        self.midi_output_target = midi_output_target # Can be FluidSynthPlayer or pygame.midi.Output
+        self.get_current_time = get_current_time_func
+        self.get_tempo_scale = tempo_scale_func
+        self.stop_flag = stop_flag
+        self.is_playing_flag = is_playing_flag # A mutable list [value] or a function
 
         self.playback_thread = None
-        self.notes_on = {}  # Tracks currently playing notes {note_index_in_sorted_list: start_playback_time}
+        self.notes_on = {}  # Tracks currently playing notes {note_index_in_list: start_playback_time}
         self.next_note_idx = 0
-        self.log_events = True # Enable/disable MIDI event logging
+        self.log_events = log_events # Use passed log_events
 
     def start_playback_thread(self):
+        if not self.midi_output_target:
+            if self.log_events: print("NoteScheduler: No MIDI output target. Cannot start playback.")
+            if callable(self.is_playing_flag): self.is_playing_flag(False)
+            else: self.is_playing_flag[0] = False
+            return
+            
         if not self.notes:
-            print("NoteScheduler: No notes to play.")
+            if self.log_events: print("NoteScheduler: No notes to play.")
             if callable(self.is_playing_flag): # if it's a setter function
                 self.is_playing_flag(False)
             else: # assume it's a mutable list/object [value]
@@ -46,19 +54,19 @@ class NoteScheduler:
             self.playback_thread.daemon = True
             self.playback_thread.start()
             if self.log_events:
-                print(f"NoteScheduler: Playback thread started. First note index: {self.next_note_idx}")
+                print(f"NoteScheduler: Playback thread started. First note index: {self.next_note_idx}. Target: {type(self.midi_output_target)}")
         else:
             if self.log_events: print("NoteScheduler: Playback thread already running.")
 
 
     def _run_schedule(self):
         if self.log_events:
-            print(f"NoteScheduler: _run_schedule entered. Notes: {len(self.notes)}")
+            print(f"NoteScheduler: _run_schedule entered. Notes: {len(self.notes)}. Target: {type(self.midi_output_target)}")
             if self.notes:
                 print(f"NoteScheduler: First note: P{self.notes[0].pitch} S{self.notes[0].start} E{self.notes[0].end}")
 
-        if not self.output_device:
-            print("NoteScheduler: No output device available for playback.")
+        if not self.midi_output_target:
+            if self.log_events: print("NoteScheduler: No MIDI output target available for playback in _run_schedule.")
             if callable(self.is_playing_flag): self.is_playing_flag(False)
             else: self.is_playing_flag[0] = False
             return
@@ -75,10 +83,12 @@ class NoteScheduler:
 
                 # Process note-offs
                 notes_to_remove_from_on = []
-                for note_idx, _ in self.notes_on.items():
+                for note_idx, _ in self.notes_on.items(): # Using note_idx from the original sorted list
                     note = self.notes[note_idx]
                     if current_time >= note.end:
-                        send_note_off(self.output_device, note.pitch, 0, 0, self.log_events)
+                        # Assuming channel 0 for now, as pretty_midi.Note doesn't have a channel attribute directly.
+                        # send_note_off handles the type of midi_output_target.
+                        send_note_off(self.midi_output_target, note.pitch, 0, 0, self.log_events)
                         notes_to_remove_from_on.append(note_idx)
                 
                 for note_idx in notes_to_remove_from_on:
@@ -89,7 +99,8 @@ class NoteScheduler:
                        current_time >= self.notes[self.next_note_idx].start):
                     note = self.notes[self.next_note_idx]
                     if current_time < note.end: # Only play if not already ended
-                        send_note_on(self.output_device, note.pitch, note.velocity, 0, self.log_events)
+                        # Assuming channel 0. send_note_on handles the type of midi_output_target.
+                        send_note_on(self.midi_output_target, note.pitch, note.velocity, 0, self.log_events)
                         self.notes_on[self.next_note_idx] = current_time 
                     self.next_note_idx += 1
                 
@@ -105,29 +116,35 @@ class NoteScheduler:
                 time.sleep(sleep_duration)
 
         except Exception as e:
-            print(f"NoteScheduler: Error in playback loop: {e}")
+            if self.log_events: print(f"NoteScheduler: Error in playback loop: {e}")
+            # Consider re-raising or specific error handling if needed by PlaybackController
         finally:
-            # Ensure all notes are turned off when the thread exits or is stopped
-            send_all_notes_off(self.output_device, self.log_events)
-            if self.log_events: print("NoteScheduler: Playback thread finished.")
-            # Do not set is_playing_flag to False here if stop_flag was the cause,
-            # as the main controller should handle that. Only if playback naturally ends.
+            # This ensures notes are off if the loop exits due to error or stop_flag
+            if self.midi_output_target:
+                send_all_notes_off(self.midi_output_target, self.log_events)
+            if self.log_events: print("NoteScheduler: Playback thread finished or exited.")
+            # Do not set is_playing_flag to False here if stop_flag was the cause of exit;
+            # PlaybackController manages that. Only set if playback naturally ends (handled above).
 
 
-    def stop_playback_thread(self):
+    def stop_playback_thread(self, join=True): # Added join parameter for flexibility
         self.stop_flag.set()
         if self.playback_thread and self.playback_thread.is_alive():
-            self.playback_thread.join(timeout=0.5) # Wait briefly for thread to exit
-        self.playback_thread = None
-        # Crucially, turn off any lingering notes if the device is still valid
-        if self.output_device:
-            send_all_notes_off(self.output_device, self.log_events)
-        if self.log_events: print("NoteScheduler: Playback thread explicitly stopped.")
+            if join:
+                self.playback_thread.join(timeout=0.5) # Wait briefly for thread to exit
+            # If not joining, the thread should see stop_flag and exit.
+        self.playback_thread = None # Important to allow new thread creation
+        
+        # Crucially, turn off any lingering notes if the target is still valid
+        # This is also called in _run_schedule's finally block, but good to have here for explicit stops.
+        if self.midi_output_target:
+            send_all_notes_off(self.midi_output_target, self.log_events)
+        if self.log_events: print("NoteScheduler: Playback thread explicitly stopped (or requested to stop).")
 
     def update_notes(self, notes):
         """Updates the notes for the scheduler. Playback should be stopped before calling this."""
         if self.playback_thread and self.playback_thread.is_alive():
-            print("NoteScheduler: Warning - updating notes while playback thread is active. Stop playback first.")
+            if self.log_events: print("NoteScheduler: Warning - updating notes while playback thread is active. Stopping playback first.")
             self.stop_playback_thread() # Ensure it's stopped
             
         self.notes = sorted(notes, key=lambda note: note.start) if notes else []
